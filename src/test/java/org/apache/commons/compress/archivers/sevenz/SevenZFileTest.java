@@ -23,6 +23,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -30,6 +33,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Random;
+import java.util.zip.CRC32;
 
 import javax.crypto.Cipher;
 
@@ -367,6 +371,389 @@ public class SevenZFileTest extends AbstractTestCase {
             assertNotNull(ae);
             assertEquals("test2.xml", ae.getName());
             assertNull(sevenZFile.getNextEntry());
+        }
+    }
+
+    /**
+     * @see "https://issues.apache.org/jira/browse/COMPRESS-542"
+     */
+    @Test
+    public void rejectsNextHeaderSizeBeyondEndOfArchive() throws IOException {
+        final byte[] header = { NID.kHeader, NID.kEnd };
+        assertCraftedArchiveIsRejected(craftArchive(0, Integer.MAX_VALUE, new byte[0], header),
+            "nextHeaderSize is out of bounds");
+    }
+
+    @Test
+    public void rejectsNextHeaderOffsetBeyondEndOfArchive() throws IOException {
+        final byte[] header = { NID.kHeader, NID.kEnd };
+        assertCraftedArchiveIsRejected(craftArchive(1L << 40, header.length, new byte[0], header),
+            "nextHeaderOffset is out of bounds");
+    }
+
+    @Test
+    public void rejectsArchivePropertyLargerThanHeader() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kArchiveProperties);
+        header.write(1);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()), "invalid property size");
+    }
+
+    @Test
+    public void rejectsHugeNumberOfPackStreams() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kMainStreamsInfo);
+        header.write(NID.kPackInfo);
+        writeNumber(header, 0);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kSize);
+        writeNumber(header, 1000);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()), "packSize (1000) is out of range");
+    }
+
+    @Test
+    public void rejectsPackStreamCrcsMissingFromHeader() throws IOException {
+        // 4 * numPackStreams overflows an int
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kMainStreamsInfo);
+        header.write(NID.kPackInfo);
+        writeNumber(header, 0);
+        writeNumber(header, 1 << 30);
+        header.write(NID.kCRC);
+        header.write(1);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()), "invalid number of CRCs in PackInfo");
+    }
+
+    @Test
+    public void rejectsHugeNumberOfFolders() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kMainStreamsInfo);
+        header.write(NID.kUnpackInfo);
+        header.write(NID.kFolder);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(0);
+        // first folder, no coders
+        writeNumber(header, 0);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()), "Folder without coders");
+    }
+
+    @Test
+    public void rejectsHugeNumberOfCoders() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        writeFolderHeaderStart(header);
+        writeNumber(header, Integer.MAX_VALUE);
+        // more alternative methods
+        header.write(0x80);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()), "Alternative methods are unsupported");
+    }
+
+    @Test
+    public void rejectsCoderPropertiesLargerThanHeader() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        writeFolderHeaderStart(header);
+        writeNumber(header, 1);
+        // id size 1, simple coder with attributes
+        header.write(0x21);
+        header.write(0x21);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()), "invalid propertiesSize in folder");
+    }
+
+    @Test
+    public void rejectsHugeNumberOfBindPairs() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        writeFolderHeaderStart(header);
+        writeNumber(header, 1);
+        // id size 1, complex coder
+        header.write(0x11);
+        header.write(0);
+        writeNumber(header, 1);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()),
+            "Total input streams can't be less than the number of bind pairs");
+    }
+
+    @Test
+    public void rejectsHugeNumberOfPackedStreamsInFolder() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        writeFolderHeaderStart(header);
+        writeNumber(header, 1);
+        // id size 1, complex coder
+        header.write(0x11);
+        header.write(0);
+        writeNumber(header, Integer.MAX_VALUE);
+        writeNumber(header, 1);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()),
+            "packedStreamIndex is bigger than number of totalInStreams");
+    }
+
+    @Test
+    public void rejectsHugeNumberOfSubStreamsWithoutSizes() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kMainStreamsInfo);
+        writeSingleCopyFolderStreamsInfo(header, 0);
+        header.write(NID.kSubStreamsInfo);
+        header.write(NID.kNumUnpackStream);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()),
+            "missing unpack sizes for folder with 2147483647 substreams");
+    }
+
+    @Test
+    public void rejectsHugeNumberOfFilesWithoutFolders() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kFilesInfo);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()), "archive with entries but no folders");
+    }
+
+    @Test
+    public void rejectsMoreFilesThanSubStreams() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kMainStreamsInfo);
+        writeSingleCopyFolderStreamsInfo(header, 0);
+        header.write(NID.kSubStreamsInfo);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        header.write(NID.kFilesInfo);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()),
+            "archive doesn't contain enough substreams for entries");
+    }
+
+    @Test
+    public void rejectsFileNamesNotMatchingNumberOfFiles() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kFilesInfo);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kName);
+        writeNumber(header, 5);
+        header.write(0);
+        header.write('a');
+        header.write(0);
+        header.write(0);
+        header.write(0);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()),
+            "Invalid number of file names (1 instead of 2147483647)");
+    }
+
+    @Test
+    public void rejectsFileNamesLargerThanHeader() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kFilesInfo);
+        writeNumber(header, 1);
+        header.write(NID.kName);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(0);
+        header.write('a');
+        header.write(0);
+        header.write(0);
+        header.write(0);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        try (SevenZFile sevenZFile = new SevenZFile(new SeekableInMemoryByteChannel(craftArchive(header.toByteArray())))) {
+            fail("Expected archive to be rejected");
+        } catch (final IOException | BufferUnderflowException expected) {
+            // the names are checked against the bytes actually present before allocating anything
+        }
+    }
+
+    @Test
+    public void rejectsEncodedHeaderWithHugeUnpackSize() throws IOException {
+        final byte[] packedStream = "hello".getBytes("US-ASCII");
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kEncodedHeader);
+        header.write(NID.kPackInfo);
+        writeNumber(header, 0);
+        writeNumber(header, 1);
+        header.write(NID.kSize);
+        writeNumber(header, packedStream.length);
+        header.write(NID.kEnd);
+        header.write(NID.kUnpackInfo);
+        header.write(NID.kFolder);
+        writeNumber(header, 1);
+        header.write(0);
+        // single COPY coder
+        writeNumber(header, 1);
+        header.write(0x01);
+        header.write(0x00);
+        header.write(NID.kCodersUnpackSize);
+        writeNumber(header, Integer.MAX_VALUE);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        final byte[] headerBytes = header.toByteArray();
+        assertCraftedArchiveIsRejected(craftArchive(packedStream.length, headerBytes.length, packedStream, headerBytes),
+            "premature end of stream");
+    }
+
+    @Test
+    public void rejectsSubStreamSizesExceedingFolderUnpackSize() throws IOException {
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kMainStreamsInfo);
+        writeSingleCopyFolderStreamsInfo(header, 1);
+        header.write(NID.kSubStreamsInfo);
+        header.write(NID.kNumUnpackStream);
+        writeNumber(header, 2);
+        header.write(NID.kSize);
+        writeNumber(header, 5);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        assertCraftedArchiveIsRejected(craftArchive(header.toByteArray()),
+            "sum of unpack sizes of folder exceeds total unpack size");
+    }
+
+    @Test
+    public void rejectsArchiveWhoseMetadataExceedsMemoryLimit() throws IOException {
+        // 8192 entries without streams only take 1024 bytes of header
+        // but need more than a MB once they are turned into SevenZArchiveEntry instances
+        final int numberOfEntries = 8192;
+        final ByteArrayOutputStream header = new ByteArrayOutputStream();
+        header.write(NID.kHeader);
+        header.write(NID.kFilesInfo);
+        writeNumber(header, numberOfEntries);
+        header.write(NID.kEmptyStream);
+        writeNumber(header, numberOfEntries / 8);
+        for (int i = 0; i < numberOfEntries / 8; i++) {
+            header.write(0xff);
+        }
+        header.write(NID.kEnd);
+        header.write(NID.kEnd);
+        final byte[] archive = craftArchive(header.toByteArray());
+
+        // the archive itself is fine and can be read without a memory limit
+        try (SevenZFile sevenZFile = new SevenZFile(new SeekableInMemoryByteChannel(archive))) {
+            int entries = 0;
+            for (final SevenZArchiveEntry entry : sevenZFile.getEntries()) {
+                assertFalse(entry.hasStream());
+                entries++;
+            }
+            assertEquals(numberOfEntries, entries);
+        }
+
+        try (SevenZFile sevenZFile = new SevenZFile(new SeekableInMemoryByteChannel(archive),
+            SevenZFileOptions.builder().withMaxMemoryLimitInKb(1024).build())) {
+            fail("Expected MemoryLimitException");
+        } catch (final MemoryLimitException expected) {
+            assertEquals(1024, expected.getMemoryLimitInKb());
+            assertTrue("Unexpected estimate: " + expected.getMemoryNeededInKb(),
+                expected.getMemoryNeededInKb() > 1024);
+        }
+    }
+
+    private static void assertCraftedArchiveIsRejected(final byte[] archive, final String expectedMessage) {
+        try (SevenZFile sevenZFile = new SevenZFile(new SeekableInMemoryByteChannel(archive))) {
+            fail("Expected IOException containing: " + expectedMessage);
+        } catch (final IOException e) {
+            assertTrue("Unexpected message: " + e.getMessage(), e.getMessage().contains(expectedMessage));
+        }
+    }
+
+    private static void writeFolderHeaderStart(final ByteArrayOutputStream header) {
+        header.write(NID.kHeader);
+        header.write(NID.kMainStreamsInfo);
+        header.write(NID.kUnpackInfo);
+        header.write(NID.kFolder);
+        writeNumber(header, 1);
+        header.write(0);
+    }
+
+    private static void writeSingleCopyFolderStreamsInfo(final ByteArrayOutputStream header, final long unpackSize) {
+        header.write(NID.kPackInfo);
+        writeNumber(header, 0);
+        writeNumber(header, 1);
+        header.write(NID.kSize);
+        writeNumber(header, 0);
+        header.write(NID.kEnd);
+        header.write(NID.kUnpackInfo);
+        header.write(NID.kFolder);
+        writeNumber(header, 1);
+        header.write(0);
+        writeNumber(header, 1);
+        header.write(0x01);
+        header.write(0x00);
+        header.write(NID.kCodersUnpackSize);
+        writeNumber(header, unpackSize);
+        header.write(NID.kEnd);
+    }
+
+    private static byte[] craftArchive(final byte[] header) {
+        return craftArchive(0, header.length, new byte[0], header);
+    }
+
+    private static byte[] craftArchive(final long nextHeaderOffset, final long nextHeaderSize,
+                                       final byte[] packedStreams, final byte[] header) {
+        final CRC32 crc = new CRC32();
+        crc.update(header);
+        final ByteBuffer startHeader = ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN);
+        startHeader.putLong(nextHeaderOffset);
+        startHeader.putLong(nextHeaderSize);
+        startHeader.putInt((int) crc.getValue());
+        crc.reset();
+        crc.update(startHeader.array());
+        final ByteBuffer archive = ByteBuffer.allocate(SevenZFile.SIGNATURE_HEADER_SIZE + packedStreams.length
+            + header.length).order(ByteOrder.LITTLE_ENDIAN);
+        archive.put(SevenZFile.sevenZSignature);
+        archive.put((byte) 0);
+        archive.put((byte) 4);
+        archive.putInt((int) crc.getValue());
+        archive.put(startHeader.array());
+        archive.put(packedStreams);
+        archive.put(header);
+        return archive.array();
+    }
+
+    private static void writeNumber(final ByteArrayOutputStream out, long value) {
+        int firstByte = 0;
+        int mask = 0x80;
+        int i;
+        for (i = 0; i < 8; i++) {
+            if (value < ((1L << ( 7  * (i + 1))))) {
+                firstByte |= (value >>> (8 * i));
+                break;
+            }
+            firstByte |= mask;
+            mask >>>= 1;
+        }
+        out.write(firstByte);
+        for (; i > 0; i--) {
+            out.write((int) (0xff & value));
+            value >>>= 8;
         }
     }
 

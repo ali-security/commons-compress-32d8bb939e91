@@ -107,6 +107,49 @@ public class IOUtilsTest {
         IOUtils.copy(new ByteArrayInputStream(new byte[0]), new ByteArrayOutputStream(), 0);
     }
 
+    @Test(expected = IllegalArgumentException.class)
+    public void copyRangeThrowsOnZeroBufferSize() throws IOException {
+        IOUtils.copyRange(new ByteArrayInputStream(new byte[0]), 5, new ByteArrayOutputStream(), 0);
+    }
+
+    @Test
+    public void copyRangeDoesntCopyMoreThanAskedFor() throws IOException {
+        try (ByteArrayInputStream in = new ByteArrayInputStream(new byte[] { 1, 2, 3, 4, 5 });
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            Assert.assertEquals(3, IOUtils.copyRange(in, 3, out));
+            out.close();
+            Assert.assertArrayEquals(new byte[] { 1, 2, 3 }, out.toByteArray());
+        }
+    }
+
+    @Test
+    public void copyRangeStopsIfThereIsNothingToCopyAnymore() throws IOException {
+        try (ByteArrayInputStream in = new ByteArrayInputStream(new byte[] { 1, 2, 3, 4, 5 });
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            Assert.assertEquals(5, IOUtils.copyRange(in, 10, out));
+            out.close();
+            Assert.assertArrayEquals(new byte[] { 1, 2, 3, 4, 5 }, out.toByteArray());
+        }
+    }
+
+    @Test
+    public void readRangeFromStreamDoesntReadMoreThanAskedFor() throws IOException {
+        try (ByteArrayInputStream in = new ByteArrayInputStream(new byte[] { 1, 2, 3, 4, 5 })) {
+            byte[] read = IOUtils.readRange(in, 3);
+            Assert.assertArrayEquals(new byte[] { 1, 2, 3 }, read);
+            Assert.assertEquals(4, in.read());
+        }
+    }
+
+    @Test
+    public void readRangeFromStreamStopsIfThereIsNothingToReadAnymore() throws IOException {
+        try (ByteArrayInputStream in = new ByteArrayInputStream(new byte[] { 1, 2, 3, 4, 5 })) {
+            byte[] read = IOUtils.readRange(in, 10);
+            Assert.assertArrayEquals(new byte[] { 1, 2, 3, 4, 5 }, read);
+            Assert.assertEquals(-1, in.read());
+        }
+    }
+
     private static void readFully(final byte[] source, ByteBuffer b) throws IOException {
         IOUtils.readFully(new ReadableByteChannel() {
                 private int idx;

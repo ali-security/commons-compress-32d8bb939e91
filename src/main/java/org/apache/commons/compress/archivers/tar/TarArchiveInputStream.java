@@ -466,12 +466,12 @@ public class TarArchiveInputStream extends ArchiveInputStream {
     }
 
     private void readGlobalPaxHeaders() throws IOException {
-        globalPaxHeaders = parsePaxHeaders(this);
+        globalPaxHeaders = parsePaxHeaders(this, entrySize);
         getNextEntry(); // Get the actual file entry
     }
 
     private void paxHeaders() throws IOException{
-        final Map<String, String> headers = parsePaxHeaders(this);
+        final Map<String, String> headers = parsePaxHeaders(this, entrySize);
         getNextEntry(); // Get the actual file entry
         applyPaxHeadersToCurrentEntry(headers);
     }
@@ -481,14 +481,29 @@ public class TarArchiveInputStream extends ArchiveInputStream {
     // https://www.gnu.org/software/tar/manual/html_section/tar_92.html#SEC188
     Map<String, String> parsePaxHeaders(final InputStream i)
         throws IOException {
+        return parsePaxHeaders(i, -1);
+    }
+
+    /**
+     * Parses the PAX headers read from the given stream.
+     *
+     * @param i input stream to read keys and values
+     * @param headerSize total size of the PAX header, will be ignored if negative
+     * @return map of PAX headers values found inside of the current (local or global) PAX headers tar entry.
+     * @throws IOException if an I/O error occurs or a PAX record claims to be bigger than the header.
+     */
+    Map<String, String> parsePaxHeaders(final InputStream i, final long headerSize)
+        throws IOException {
         final Map<String, String> headers = new HashMap<>(globalPaxHeaders);
         // Format is "length keyword=value\n";
+        int totalRead = 0;
         while(true){ // get length
             int ch;
             int len = 0;
             int read = 0;
             while((ch = i.read()) != -1) {
                 read++;
+                totalRead++;
                 if (ch == '\n') { // blank line in header
                     break;
                 } else if (ch == ' '){ // End of length string
@@ -496,15 +511,22 @@ public class TarArchiveInputStream extends ArchiveInputStream {
                     final ByteArrayOutputStream coll = new ByteArrayOutputStream();
                     while((ch = i.read()) != -1) {
                         read++;
+                        totalRead++;
+                        if (totalRead < 0 || (headerSize >= 0 && totalRead >= headerSize)) {
+                            break;
+                        }
                         if (ch == '='){ // end of keyword
                             final String keyword = coll.toString(CharsetNames.UTF_8);
                             // Get rest of entry
                             final int restLen = len - read;
-                            if (restLen == 1) { // only NL
+                            if (restLen <= 1) { // only NL
                                 headers.remove(keyword);
+                            } else if (headerSize >= 0 && restLen > headerSize - totalRead) {
+                                throw new IOException("Paxheader value size " + restLen
+                                    + " exceeds size of header record");
                             } else {
-                                final byte[] rest = new byte[restLen];
-                                final int got = IOUtils.readFully(i, rest);
+                                final byte[] rest = IOUtils.readRange(i, restLen);
+                                final int got = rest.length;
                                 if (got != restLen) {
                                     throw new IOException("Failed to read "
                                                           + "Paxheader. Expected "
@@ -512,6 +534,7 @@ public class TarArchiveInputStream extends ArchiveInputStream {
                                                           + " bytes, read "
                                                           + got);
                                 }
+                                totalRead += restLen;
                                 // Drop trailing NL
                                 final String value = new String(rest, 0,
                                                           restLen - 1, CharsetNames.UTF_8);

@@ -110,6 +110,92 @@ public class TarArchiveInputStreamTest {
     }
 
     @Test
+    public void readPaxHeadersWithinHeaderSize() throws Exception {
+        final byte[] data = "11 foo=bar\n30 atime=1321711775.972059463\n".getBytes(CharsetNames.UTF_8);
+        final InputStream is = new ByteArrayInputStream(new byte[1]);
+        final TarArchiveInputStream tais = new TarArchiveInputStream(is);
+        final Map<String, String> headers = tais
+            .parsePaxHeaders(new ByteArrayInputStream(data), data.length);
+        assertEquals(2, headers.size());
+        assertEquals("bar", headers.get("foo"));
+        assertEquals("1321711775.972059463", headers.get("atime"));
+        tais.close();
+    }
+
+    @Test
+    public void rejectsPaxHeaderValueBiggerThanHeaderSize() throws Exception {
+        final byte[] data = "1000000000 a=b\n".getBytes(CharsetNames.UTF_8);
+        final InputStream is = new ByteArrayInputStream(new byte[1]);
+        final TarArchiveInputStream tais = new TarArchiveInputStream(is);
+        try {
+            tais.parsePaxHeaders(new ByteArrayInputStream(data), data.length);
+            fail("should have rejected the PAX record exceeding the header size");
+        } catch (final IOException ex) {
+            assertTrue(ex.getMessage(), ex.getMessage().contains("exceeds size of header record"));
+        } finally {
+            tais.close();
+        }
+    }
+
+    @Test
+    public void ignoresPaxHeaderWithLengthSmallerThanItsKeyword() throws Exception {
+        final InputStream is = new ByteArrayInputStream(new byte[1]);
+        final TarArchiveInputStream tais = new TarArchiveInputStream(is);
+        final Map<String, String> headers = tais
+            .parsePaxHeaders(new ByteArrayInputStream("1 foo=bar\n".getBytes(CharsetNames.UTF_8)));
+        assertEquals(0, headers.size());
+        tais.close();
+    }
+
+    /**
+     * CVE-2021-35517: a PAX record claiming a length far beyond the size of
+     * the PAX header entry must not lead to a huge allocation.
+     */
+    @Test(timeout = 30000)
+    public void shouldThrowAnExceptionOnPaxRecordLongerThanPaxHeaderEntry() throws Exception {
+        final byte[] paxData = "2147483647 a=b\n".getBytes(CharsetNames.UTF_8);
+        final byte[] archive = createArchiveWithPaxHeader(paxData.length, paxData);
+        try (TarArchiveInputStream is = new TarArchiveInputStream(new ByteArrayInputStream(archive))) {
+            is.getNextTarEntry();
+            fail("should have rejected the PAX record exceeding the header size");
+        } catch (final IOException ex) {
+            assertTrue(ex.getMessage(), ex.getMessage().contains("exceeds size of header record"));
+        }
+    }
+
+    /**
+     * CVE-2021-35517: a PAX header entry whose declared size is huge but which
+     * holds only a few bytes must not allocate memory for the claimed record length.
+     */
+    @Test(timeout = 30000)
+    public void shouldThrowAnExceptionOnTruncatedHugePaxRecord() throws Exception {
+        final byte[] paxData = "2000000000 a=b\n".getBytes(CharsetNames.UTF_8);
+        final byte[] archive = createArchiveWithPaxHeader(TarConstants.MAXSIZE, paxData);
+        try (TarArchiveInputStream is = new TarArchiveInputStream(new ByteArrayInputStream(archive))) {
+            is.getNextTarEntry();
+            fail("should have rejected the truncated PAX record");
+        } catch (final IOException ex) {
+            // expected
+        }
+    }
+
+    private static byte[] createArchiveWithPaxHeader(final long declaredSize, final byte[] paxData)
+        throws IOException {
+        final TarArchiveEntry paxEntry = new TarArchiveEntry("./PaxHeaders.X/test",
+            TarConstants.LF_PAX_EXTENDED_HEADER_LC);
+        paxEntry.setSize(declaredSize);
+        final byte[] header = new byte[TarConstants.DEFAULT_RCDSIZE];
+        paxEntry.writeEntryHeader(header);
+        final byte[] data = new byte[TarConstants.DEFAULT_RCDSIZE];
+        System.arraycopy(paxData, 0, data, 0, paxData.length);
+        final ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bos.write(header);
+        bos.write(data);
+        bos.write(new byte[2 * TarConstants.DEFAULT_RCDSIZE]);
+        return bos.toByteArray();
+    }
+
+    @Test
     public void workaroundForBrokenTimeHeader() throws Exception {
         TarArchiveInputStream in = null;
         try {

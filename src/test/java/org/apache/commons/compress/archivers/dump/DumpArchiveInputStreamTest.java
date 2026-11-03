@@ -93,4 +93,55 @@ public class DumpArchiveInputStreamTest extends AbstractTestCase {
         }
     }
 
+    @Test
+    public void testDirectoryNullBytes() throws Exception {
+        try (InputStream is = new FileInputStream(getFile("org/apache/commons/compress/dump/directory_null_bytes-fail.dump"));
+             DumpArchiveInputStream archive = new DumpArchiveInputStream(is)) {
+            try {
+                archive.getNextEntry();
+                fail("expected an exception");
+            } catch (final InvalidFormatException ex) {
+                // expected
+            }
+        }
+    }
+
+    @Test
+    public void testInvalidCompressType() throws Exception {
+        try (InputStream is = new FileInputStream(getFile("org/apache/commons/compress/dump/invalid_compression_type-fail.dump"))) {
+            new DumpArchiveInputStream(is).close();
+            fail("expected an exception");
+        } catch (final ArchiveException ex) {
+            // expected
+            assertTrue(ex.getCause() instanceof UnsupportedCompressionAlgorithmException);
+        }
+    }
+
+    @Test(timeout = 15000)
+    public void testLoopingInodes() throws Exception {
+        try (InputStream is = new FileInputStream(getFile("org/apache/commons/compress/dump/looping_inodes-fail.dump"));
+             DumpArchiveInputStream archive = new DumpArchiveInputStream(is)) {
+            archive.getNextEntry();
+            try {
+                archive.getNextEntry();
+                fail("expected an exception");
+            } catch (final DumpArchiveException ex) {
+                // expected
+            }
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testRecLenZeroLongExecution() throws Exception {
+        try (InputStream is = new FileInputStream(getFile("org/apache/commons/compress/dump/reclen_zero-fail.dump"));
+             DumpArchiveInputStream archive = new DumpArchiveInputStream(is)) {
+            try {
+                archive.getNextEntry();
+                fail("expected an exception");
+            } catch (final DumpArchiveException ex) {
+                // expected
+            }
+        }
+    }
+
 }

@@ -18,9 +18,16 @@
  */
 package org.apache.commons.compress.archivers.sevenz;
 
+import java.io.IOException;
+import java.util.Iterator;
+
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 
 /**
@@ -82,6 +89,110 @@ public class FolderTest {
 
         assertEquals(0, folder.findBindPairForInStream(0));
 
+    }
+
+
+    @Test
+    public void testGetOrderedCodersFollowsBindPairs() throws Exception {
+
+        Coder first = new Coder();
+        Coder second = new Coder();
+        Folder folder = folder(new Coder[] { first, second }, new long[] { 0 },
+            bindPair(1, 0));
+
+        Iterator<Coder> coders = folder.getOrderedCoders().iterator();
+        assertSame(first, coders.next());
+        assertSame(second, coders.next());
+        assertFalse(coders.hasNext());
+
+    }
+
+
+    @Test(timeout = 10000)
+    public void testGetOrderedCodersRejectsCoderBoundToItself() throws Exception {
+
+        Folder folder = folder(new Coder[] { new Coder() }, new long[] { 0 },
+            bindPair(0, 0));
+
+        assertRejectsCoderChain(folder);
+
+    }
+
+
+    @Test(timeout = 10000)
+    public void testGetOrderedCodersRejectsCyclicCoderChain() throws Exception {
+
+        Folder folder = folder(new Coder[] { new Coder(), new Coder() }, new long[] { 0 },
+            bindPair(1, 0), bindPair(0, 1));
+
+        assertRejectsCoderChain(folder);
+
+    }
+
+
+    @Test(timeout = 10000)
+    public void testGetOrderedCodersRejectsChainEnteringLoop() throws Exception {
+
+        Folder folder = folder(new Coder[] { new Coder(), new Coder(), new Coder() }, new long[] { 0 },
+            bindPair(1, 0), bindPair(1, 1));
+
+        assertRejectsCoderChain(folder);
+
+    }
+
+
+    @Test
+    public void testGetOrderedCodersStopsAtOutOfRangeCoderIndex() throws Exception {
+
+        Coder only = new Coder();
+        Folder folder = folder(new Coder[] { only }, new long[] { 0 },
+            bindPair(1, 0));
+
+        Iterator<Coder> coders = folder.getOrderedCoders().iterator();
+        assertSame(only, coders.next());
+        assertFalse(coders.hasNext());
+
+        folder.packedStreams = new long[] { 5 };
+        assertFalse(folder.getOrderedCoders().iterator().hasNext());
+
+    }
+
+
+    @Test
+    public void testGetOrderedCodersWithoutPackedStreamsIsEmpty() throws Exception {
+
+        Folder folder = folder(new Coder[] { new Coder() }, new long[0]);
+
+        assertFalse(folder.getOrderedCoders().iterator().hasNext());
+
+    }
+
+
+    private static Folder folder(final Coder[] coders, final long[] packedStreams,
+                                 final BindPair... bindPairs) {
+        Folder folder = new Folder();
+        folder.coders = coders;
+        folder.packedStreams = packedStreams;
+        folder.bindPairs = bindPairs;
+        return folder;
+    }
+
+
+    private static BindPair bindPair(final long inIndex, final long outIndex) {
+        BindPair bindPair = new BindPair();
+        bindPair.inIndex = inIndex;
+        bindPair.outIndex = outIndex;
+        return bindPair;
+    }
+
+
+    private static void assertRejectsCoderChain(final Folder folder) {
+        try {
+            folder.getOrderedCoders();
+            fail("expected an IOException for a coder used more than once in the coder chain");
+        } catch (IOException ex) {
+            assertTrue(ex.getMessage(), ex.getMessage().contains("same coder more than once"));
+        }
     }
 
 

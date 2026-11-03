@@ -16,40 +16,50 @@
 sudo: false
 language: java
 
+# Travis can no longer provision openjdk7, openjdk12/13 or the oraclejdk* builds, and its
+# openjdk10 cannot TLS-handshake Maven Central, so those legs install the same JDK line
+# from Azul Zulu (SEAL_ZULU) on top of a provisioned image. Newer Zulu builds get the base
+# image's current truststore. The oraclejdk and openjdk-ea legs are dropped.
 matrix:
   include:
-    - dist: trusty
-      jdk: openjdk7
-    - dist: trusty
-      jdk: openjdk8
-    - dist: xenial
-      jdk: openjdk10
-    - dist: xenial
-      jdk: openjdk11
-    - dist: trusty
-      jdk: oraclejdk8
-    - dist: trusty
-      jdk: oraclejdk9
-    - dist: trusty
-      jdk: oraclejdk11
-    - dist: trusty
-      jdk: oraclejdk12
-    - dist: trusty
-      jdk: openjdk12
-    - dist: trusty
-      jdk: openjdk13
-    - dist: trusty
-      jdk: openjdk-ea
+    - jdk: openjdk8
+      env: SEAL_ZULU=zulu7.56.0.11-ca-jdk7.0.352-linux_x64
+    - jdk: openjdk8
+    - jdk: openjdk11
+      env: SEAL_ZULU=zulu10.3.5-ca-jdk10.0.2-linux_x64
+    - jdk: openjdk11
+    - jdk: openjdk11
+      env: SEAL_ZULU=zulu12.3.11-ca-jdk12.0.2-linux_x64
+    - jdk: openjdk11
+      env: SEAL_ZULU=zulu13.54.17-ca-jdk13.0.14-linux_x64
 
 cache:
   directories:
     - $HOME/.m2
     - .mvn
+
+before_install:
+  - |
+    if [ -n "$SEAL_ZULU" ]; then
+      BASE_CACERTS="$JAVA_HOME/lib/security/cacerts"
+      curl -fsSL "https://cdn.azul.com/zulu/bin/$SEAL_ZULU.tar.gz" -o /tmp/zulu.tgz
+      mkdir -p /tmp/zulu-jdk
+      tar -xzf /tmp/zulu.tgz -C /tmp/zulu-jdk --strip-components=1
+      export JAVA_HOME=/tmp/zulu-jdk
+      export PATH="$JAVA_HOME/bin:$PATH"
+      if [ -f "$JAVA_HOME/lib/security/cacerts" ] && [ -f "$BASE_CACERTS" ]; then
+        cp "$BASE_CACERTS" "$JAVA_HOME/lib/security/cacerts"
+      fi
+    fi
+  - java -version
+
 # don't run mvn install before building
 install: true
 
 # do all the building and testing in a single phase, instead of compiling everything three times
 # and running all tests twice.
-
+# apache-rat:check (licence gate) and jacoco/coveralls reporting (needs a Coveralls token) are dropped.
+# pax-url defaults to http://repo1.maven.org, which Central now rejects (501), so OsgiITest gets HTTPS.
 script:
-   - ./mvnw clean apache-rat:check test jacoco:report coveralls:report -Ptravis-jacoco
+   - ./mvnw -B -V clean test -Drat.skip=true -Dorg.ops4j.pax.url.mvn.repositories=https://repo1.maven.org/maven2@id=central
+   - python3 .travis/surefire-summary.py
